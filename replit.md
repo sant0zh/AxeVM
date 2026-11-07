@@ -1,15 +1,17 @@
-# [Project name]
+# AxeVM
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A responsive ARM64 virtual-machine manager prototype for configuring AxeOS-ready VMs, with execution clearly marked unavailable until QEMU is integrated.
 
 ## Run & Operate
 
 - `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- `pnpm --filter @workspace/axe-vm run dev` — run the AxeVM interface
+- `pnpm --filter @workspace/axe-vm run typecheck` — typecheck the AxeVM interface
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- The AxeVM prototype does not require a backend or database.
 
 ## Stack
 
@@ -22,15 +24,18 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/axe-vm/` — React + TypeScript browser prototype
+- `docs/architecture.md` — architecture boundaries and the planned native/QEMU integration
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Keep VM configuration persistence behind a repository boundary, separate from UI state.
+- Keep VM execution behind an engine boundary; the current prototype reports execution as unavailable and does not simulate boots.
+- See `docs/architecture.md` for the prototype storage choice and planned Kotlin/Compose, JNI, and QEMU boundaries.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+The initial milestone is a responsive dashboard and VM configuration manager with console, storage, and settings surfaces. VM configuration is persistent in the browser prototype; guest execution is not available.
 
 ## User preferences
 

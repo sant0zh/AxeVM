@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "AxeVM"
+description = "A responsive ARM64 virtual machine manager prototype for creating and managing AxeOS-ready VM configurations, with execution explicitly marked as in development until QEMU is integrated."
+version = "1.0.0"
+id = "artifacts/axe-vm"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23629
+
+[services.development]
+run = "pnpm --filter @workspace/axe-vm run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/axe-vm", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/axe-vm/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23629"
+BASE_PATH = "/"
