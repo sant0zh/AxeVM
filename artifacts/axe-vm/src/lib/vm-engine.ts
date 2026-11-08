@@ -1,21 +1,22 @@
 import type {
   Arm64MachineType,
   AssetKind,
+  CpuModel,
   GuestArchitecture,
   VMConfig,
-} from './workspace';
+} from './workspace.ts';
 
 export type VMExecutionState =
-  | 'preparing'
   | 'starting'
   | 'running'
   | 'stopping'
   | 'stopped'
-  | 'failed';
+  | 'error';
 
 export type EngineAvailability = {
   available: boolean;
-  engine: 'qemu' | 'none';
+  engine: 'qemu' | 'mock' | 'none';
+  mode: 'real' | 'simulated' | 'unavailable';
   hostArchitecture: 'aarch64' | 'unknown';
   guestArchitectures: readonly GuestArchitecture[];
   machineTypes: readonly Arm64MachineType[];
@@ -29,7 +30,9 @@ export type VMEngineErrorCode =
   | 'asset-not-found'
   | 'asset-storage-failed'
   | 'process-not-found'
-  | 'launch-failed';
+  | 'launch-failed'
+  | 'invalid-state'
+  | 'operation-in-progress';
 
 export type VMEngineError = {
   code: VMEngineErrorCode;
@@ -75,7 +78,7 @@ export async function createVMExecutionRequest(
   if (
     config.architecture !== 'aarch64'
     || config.machineType !== 'virt'
-    || config.cpuModel !== 'max'
+    || !(['max', 'cortex-a72'] as CpuModel[]).includes(config.cpuModel)
     || !Number.isInteger(config.vcpuCount)
     || config.vcpuCount < 1
     || config.vcpuCount > 64
@@ -161,6 +164,7 @@ export const unavailableEngine: VMEngine = {
   getAvailability: () => ({
     available: false,
     engine: 'none',
+    mode: 'unavailable',
     hostArchitecture: 'unknown',
     guestArchitectures: [],
     machineTypes: [],

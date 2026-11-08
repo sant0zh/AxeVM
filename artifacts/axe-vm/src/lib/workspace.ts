@@ -1,4 +1,4 @@
-export const WORKSPACE_SCHEMA_VERSION = 2 as const;
+export const WORKSPACE_SCHEMA_VERSION = 3 as const;
 export const ARM64_HARDWARE_DEFAULTS = {
   architecture: 'aarch64',
   machineType: 'virt',
@@ -8,7 +8,7 @@ export const ARM64_HARDWARE_DEFAULTS = {
 
 export type GuestArchitecture = typeof ARM64_HARDWARE_DEFAULTS.architecture;
 export type Arm64MachineType = typeof ARM64_HARDWARE_DEFAULTS.machineType;
-export type CpuModel = typeof ARM64_HARDWARE_DEFAULTS.cpuModel;
+export type CpuModel = 'max' | 'cortex-a72';
 export type AssetKind = 'Virtual disk' | 'Boot image';
 export type AssetStorageStatus = 'indexeddb' | 'reference-only';
 
@@ -45,6 +45,8 @@ export type AssetRecord = {
 export type Preferences = {
   defaultRamMiB: number;
   defaultDiskGiB: number;
+  defaultCpuModel: CpuModel;
+  defaultMachineType: Arm64MachineType;
   confirmDelete: boolean;
   compactRows: boolean;
 };
@@ -60,6 +62,8 @@ const STORAGE_KEY = 'axevm.workspace.v1';
 export const DEFAULT_PREFERENCES: Preferences = {
   defaultRamMiB: 4096,
   defaultDiskGiB: 32,
+  defaultCpuModel: ARM64_HARDWARE_DEFAULTS.cpuModel,
+  defaultMachineType: ARM64_HARDWARE_DEFAULTS.machineType,
   confirmDelete: true,
   compactRows: false,
 };
@@ -111,6 +115,7 @@ function normalizeVm(value: unknown, index: number): VMConfig {
   const rawArchitecture = typeof value.architecture === 'string' ? value.architecture : 'AArch64';
   const rawMachineType = typeof value.machineType === 'string' ? value.machineType : 'virt';
   const rawCpuModel = typeof value.cpuModel === 'string' ? value.cpuModel : 'max';
+  const cpuModel: CpuModel = rawCpuModel === 'cortex-a72' ? 'cortex-a72' : ARM64_HARDWARE_DEFAULTS.cpuModel;
   const architectureWasLegacy = !['aarch64', 'arm64'].includes(rawArchitecture.toLowerCase());
   const vcpuCount = value.vcpuCount === undefined
     ? ARM64_HARDWARE_DEFAULTS.vcpuCount
@@ -124,7 +129,7 @@ function normalizeVm(value: unknown, index: number): VMConfig {
     ramMiB: requiredInteger(value.ramMiB, `VM ${index + 1} RAM allocation`, 256),
     diskGiB: requiredInteger(value.diskGiB, `VM ${index + 1} disk capacity`, 1),
     machineType: ARM64_HARDWARE_DEFAULTS.machineType,
-    cpuModel: ARM64_HARDWARE_DEFAULTS.cpuModel,
+    cpuModel,
     vcpuCount,
     diskAssetId: typeof value.diskAssetId === 'string' ? value.diskAssetId : undefined,
     bootImageId: typeof value.bootImageId === 'string' ? value.bootImageId : undefined,
@@ -136,7 +141,7 @@ function normalizeVm(value: unknown, index: number): VMConfig {
       : rawMachineType === ARM64_HARDWARE_DEFAULTS.machineType ? undefined : rawMachineType,
     legacyCpuModel: typeof value.legacyCpuModel === 'string'
       ? value.legacyCpuModel
-      : rawCpuModel === ARM64_HARDWARE_DEFAULTS.cpuModel ? undefined : rawCpuModel,
+      : rawCpuModel === cpuModel ? undefined : rawCpuModel,
     createdAt: safeDate(value.createdAt, now),
     updatedAt: safeDate(value.updatedAt, now),
   };
@@ -169,6 +174,9 @@ function normalizeAsset(value: unknown, index: number): AssetRecord {
 
 function normalizePreferences(value: unknown): Preferences {
   const raw = isRecord(value) ? value : {};
+  const defaultCpuModel: CpuModel = raw.defaultCpuModel === 'cortex-a72'
+    ? 'cortex-a72'
+    : DEFAULT_PREFERENCES.defaultCpuModel;
   return {
     defaultRamMiB: typeof raw.defaultRamMiB === 'number' && Number.isInteger(raw.defaultRamMiB) && raw.defaultRamMiB >= 256
       ? raw.defaultRamMiB
@@ -176,6 +184,10 @@ function normalizePreferences(value: unknown): Preferences {
     defaultDiskGiB: typeof raw.defaultDiskGiB === 'number' && Number.isInteger(raw.defaultDiskGiB) && raw.defaultDiskGiB >= 1
       ? raw.defaultDiskGiB
       : DEFAULT_PREFERENCES.defaultDiskGiB,
+    defaultCpuModel,
+    defaultMachineType: raw.defaultMachineType === ARM64_HARDWARE_DEFAULTS.machineType
+      ? ARM64_HARDWARE_DEFAULTS.machineType
+      : DEFAULT_PREFERENCES.defaultMachineType,
     confirmDelete: typeof raw.confirmDelete === 'boolean' ? raw.confirmDelete : DEFAULT_PREFERENCES.confirmDelete,
     compactRows: typeof raw.compactRows === 'boolean' ? raw.compactRows : DEFAULT_PREFERENCES.compactRows,
   };
