@@ -1,6 +1,6 @@
 # AxeVM
 
-A responsive ARM64 virtual-machine manager prototype for configuring AxeOS-ready VMs, with execution clearly marked unavailable until QEMU is integrated.
+A responsive ARM64 VM manager prototype for configuring AxeOS-ready profiles and preparing a clean boundary for future native QEMU execution.
 
 ## Run & Operate
 
@@ -25,17 +25,21 @@ A responsive ARM64 virtual-machine manager prototype for configuring AxeOS-ready
 ## Where things live
 
 - `artifacts/axe-vm/` — React + TypeScript browser prototype
-- `docs/architecture.md` — architecture boundaries and the planned native/QEMU integration
+- `artifacts/axe-vm/src/lib/workspace.ts` — VM/asset types, schema migration, browser workspace persistence
+- `artifacts/axe-vm/src/lib/asset-storage.ts` — IndexedDB persistence for imported asset bytes
+- `artifacts/axe-vm/src/lib/vm-engine.ts` — typed execution, capabilities, session, event, and asset-resolution contracts
+- `docs/architecture.md` — Iteration 1 architecture and deferred native/QEMU work
 
 ## Architecture decisions
 
-- Keep VM configuration persistence behind a repository boundary, separate from UI state.
-- Keep VM execution behind an engine boundary; the current prototype reports execution as unavailable and does not simulate boots.
-- See `docs/architecture.md` for the prototype storage choice and planned Kotlin/Compose, JNI, and QEMU boundaries.
+- Keep VM configuration and binary asset storage behind separate persistence boundaries.
+- Use the ARM64 QEMU `virt` machine and generic `max` CPU profile; preserve unsupported legacy hardware labels when normalizing old saves.
+- Keep VM execution behind a typed engine boundary; the current adapter reports execution unavailable and never simulates a boot.
+- See `docs/architecture.md` for schema migration and the planned Kotlin/Compose, JNI, and QEMU boundaries.
 
 ## Product
 
-The initial milestone is a responsive dashboard and VM configuration manager with console, storage, and settings surfaces. VM configuration is persistent in the browser prototype; guest execution is not available.
+Iteration 1 provides ARM64 VM configuration management, schema-versioned browser persistence, local asset-file storage, and a typed unavailable VM-engine adapter. Native execution and the Iteration 2 UI work remain deferred.
 
 ## User preferences
 

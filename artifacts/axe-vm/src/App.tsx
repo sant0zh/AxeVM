@@ -1,17 +1,18 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
 import { Link, Route, Router as WouterRouter, Switch, useLocation } from 'wouter';
 import {
   Activity, AlertTriangle, ArrowDownToLine, ArrowLeft, Box, Check, ChevronRight,
-  Cpu, FileArchive, FileImage, HardDrive, LayoutDashboard,
+  Cpu, Download, FileArchive, FileImage, HardDrive, LayoutDashboard,
   Plus, Save, Settings2, ShieldCheck, SlidersHorizontal, Terminal,
   Trash2, Upload, X, Zap,
 } from 'lucide-react';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
+import { assetBinaryStorage } from '@/lib/asset-storage';
 import {
-  createId, workspaceStorage,
-  type AssetRecord, type Preferences, type VMConfig, type WorkspaceData,
+  ARM64_HARDWARE_DEFAULTS, createId, workspaceStorage,
+  type AssetKind, type AssetRecord, type Preferences, type VMConfig, type WorkspaceData,
 } from '@/lib/workspace';
 import { unavailableEngine } from '@/lib/vm-engine';
 
@@ -40,8 +41,9 @@ function App() {
   const [location] = useLocation();
   const [initialWorkspace] = useState(() => workspaceStorage.load());
   const [data, setData] = useState<WorkspaceData>(() => initialWorkspace.data);
+  const dataRef = useRef(data);
   const [storageError, setStorageError] = useState(initialWorkspace.error);
-  const storageLoadFailed = useRef(initialWorkspace.error !== null);
+  const storageLoadFailed = useRef(initialWorkspace.persistenceBlocked);
   const [toastMessage, setToastMessage] = useState('');
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selectedVm = useMemo(() => data.vms.find((vm) => vm.id === data.selectedVmId) ?? data.vms[0] ?? null, [data.vms, data.selectedVmId]);
@@ -51,21 +53,30 @@ function App() {
     toastTimer.current = setTimeout(() => setToastMessage(''), 3200);
   };
 
-  useEffect(() => {
-    if (storageLoadFailed.current) return;
-    try {
-      workspaceStorage.save(data);
-      setStorageError(null);
-    } catch {
-      setStorageError('The latest changes could not be saved in this browser. Changes in this session may be lost.');
-    }
-  }, [data]);
-
   useEffect(() => () => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
   }, []);
 
-  const patch = (updater: (current: WorkspaceData) => WorkspaceData) => setData((current) => updater(current));
+  const patch = (updater: (current: WorkspaceData) => WorkspaceData): boolean => {
+    if (storageLoadFailed.current) {
+      notify('Changes were not saved because the existing workspace could not be read.');
+      return false;
+    }
+
+    const next = updater(dataRef.current);
+    try {
+      workspaceStorage.save(next);
+    } catch {
+      setStorageError('The latest changes could not be saved in this browser. The displayed workspace was not changed.');
+      notify('Could not save changes in browser storage.');
+      return false;
+    }
+
+    dataRef.current = next;
+    setData(next);
+    setStorageError(null);
+    return true;
+  };
 
   return (
     <ErrorBoundary resetKey={location}>
@@ -181,16 +192,23 @@ function VMRow({ vm, selected, onSelect }: { vm: VMConfig; selected: boolean; on
     <div className="vm-row" data-testid={`row-vm-${vm.id}`}>
       <div className="vm-ident"><div className="vm-glyph"><Cpu size={17} /></div><div style={{ minWidth: 0 }}><button className="vm-name" onClick={onSelect} data-testid={`button-select-vm-${vm.id}`}>{vm.name}</button><div className="vm-id">{selected ? 'SELECTED · ' : ''}{vm.id.slice(0, 8).toUpperCase()}</div></div></div>
       <div className="vm-spec">{vm.ramMiB.toLocaleString()} MiB RAM</div>
-      <div className="vm-spec">{vm.diskGiB} GiB · {vm.machineType}</div>
+      <div className="vm-spec">{vm.vcpuCount} vCPU · {vm.diskGiB} GiB disk</div>
       <div className="vm-actions"><span className="state-tag">Saved config</span></div>
     </div>
   );
 }
 
-type VMFormValues = { name: string; ramMiB: string; diskGiB: string; machineType: string; bootImageId: string };
-const blankForm = (preferences: Preferences): VMFormValues => ({ name: '', ramMiB: String(preferences.defaultRamMiB), diskGiB: String(preferences.defaultDiskGiB), machineType: 'virt', bootImageId: '' });
+type VMFormValues = { name: string; ramMiB: string; diskGiB: string; vcpuCount: string; diskAssetId: string; bootImageId: string };
+const blankForm = (preferences: Preferences): VMFormValues => ({
+  name: '',
+  ramMiB: String(preferences.defaultRamMiB),
+  diskGiB: String(preferences.defaultDiskGiB),
+  vcpuCount: String(ARM64_HARDWARE_DEFAULTS.vcpuCount),
+  diskAssetId: '',
+  bootImageId: '',
+});
 
-function VMManager({ data, selectedVm, patch, notify }: { data: WorkspaceData; selectedVm: VMConfig | null; patch: (updater: (current: WorkspaceData) => WorkspaceData) => void; notify: ToastFn }) {
+function VMManager({ data, selectedVm, patch, notify }: { data: WorkspaceData; selectedVm: VMConfig | null; patch: (updater: (current: WorkspaceData) => WorkspaceData) => boolean; notify: ToastFn }) {
   const [editing, setEditing] = useState<VMConfig | null>(null);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState<VMFormValues>(() => blankForm(data.preferences));
@@ -202,7 +220,14 @@ function VMManager({ data, selectedVm, patch, notify }: { data: WorkspaceData; s
   const beginEdit = (vm: VMConfig) => {
     patch((current) => ({ ...current, selectedVmId: vm.id }));
     setEditing(vm);
-    setForm({ name: vm.name, ramMiB: String(vm.ramMiB), diskGiB: String(vm.diskGiB), machineType: vm.machineType, bootImageId: vm.bootImageId ?? '' });
+    setForm({
+      name: vm.name,
+      ramMiB: String(vm.ramMiB),
+      diskGiB: String(vm.diskGiB),
+      vcpuCount: String(vm.vcpuCount),
+      diskAssetId: vm.diskAssetId ?? '',
+      bootImageId: vm.bootImageId ?? '',
+    });
     setCreating(true);
   };
   const save = (event: FormEvent) => {
@@ -210,27 +235,58 @@ function VMManager({ data, selectedVm, patch, notify }: { data: WorkspaceData; s
     const name = form.name.trim();
     const ramMiB = Number(form.ramMiB);
     const diskGiB = Number(form.diskGiB);
-    if (!name || !Number.isFinite(ramMiB) || ramMiB < 256 || !Number.isFinite(diskGiB) || diskGiB < 1) {
-      notify('Enter a name, at least 256 MiB RAM, and at least 1 GiB disk.');
+    const vcpuCount = Number(form.vcpuCount);
+    if (!name || !Number.isInteger(ramMiB) || ramMiB < 256 || !Number.isInteger(diskGiB) || diskGiB < 1 || !Number.isInteger(vcpuCount) || vcpuCount < 1 || vcpuCount > 64) {
+      notify('Enter a name, valid memory and disk sizes, and 1–64 virtual CPUs.');
+      return;
+    }
+    if (data.vms.some((vm) => vm.name.toLowerCase() === name.toLowerCase() && vm.id !== editing?.id)) {
+      notify('A VM configuration with that name already exists.');
       return;
     }
     const now = new Date().toISOString();
     if (editing) {
-      const updated: VMConfig = { ...editing, name, architecture: 'AArch64', ramMiB, diskGiB, machineType: form.machineType, bootImageId: form.bootImageId || undefined, updatedAt: now };
-      patch((current) => ({ ...current, vms: current.vms.map((vm) => vm.id === editing.id ? updated : vm), selectedVmId: updated.id }));
+      const updated: VMConfig = {
+        ...editing,
+        name,
+        architecture: ARM64_HARDWARE_DEFAULTS.architecture,
+        ramMiB,
+        diskGiB,
+        machineType: ARM64_HARDWARE_DEFAULTS.machineType,
+        cpuModel: ARM64_HARDWARE_DEFAULTS.cpuModel,
+        vcpuCount,
+        diskAssetId: form.diskAssetId || undefined,
+        bootImageId: form.bootImageId || undefined,
+        updatedAt: now,
+      };
+      if (!patch((current) => ({ ...current, vms: current.vms.map((vm) => vm.id === editing.id ? updated : vm), selectedVmId: updated.id }))) return;
       notify('Configuration updated and saved locally.');
     } else {
-      const created: VMConfig = { id: createId(), name, architecture: 'AArch64', ramMiB, diskGiB, machineType: form.machineType, bootImageId: form.bootImageId || undefined, createdAt: now, updatedAt: now };
-      patch((current) => ({ ...current, vms: [created, ...current.vms], selectedVmId: created.id }));
+      const created: VMConfig = {
+        id: createId(),
+        name,
+        architecture: ARM64_HARDWARE_DEFAULTS.architecture,
+        ramMiB,
+        diskGiB,
+        machineType: ARM64_HARDWARE_DEFAULTS.machineType,
+        cpuModel: ARM64_HARDWARE_DEFAULTS.cpuModel,
+        vcpuCount,
+        diskAssetId: form.diskAssetId || undefined,
+        bootImageId: form.bootImageId || undefined,
+        createdAt: now,
+        updatedAt: now,
+      };
+      if (!patch((current) => ({ ...current, vms: [created, ...current.vms], selectedVmId: created.id }))) return;
       notify('VM configuration created and saved locally.');
     }
     setCreating(false);
   };
   const deleteVm = (target: VMConfig) => {
-    patch((current) => {
+    const saved = patch((current) => {
       const vms = current.vms.filter((vm) => vm.id !== target.id);
       return { ...current, vms, selectedVmId: current.selectedVmId === target.id ? (vms[0]?.id ?? null) : current.selectedVmId };
     });
+    if (!saved) return;
     notify(`Removed “${target.name}”.`);
     setDeleteTarget(null);
   };
@@ -248,11 +304,15 @@ function VMManager({ data, selectedVm, patch, notify }: { data: WorkspaceData; s
             <div className="form-grid">
               <div className="field full"><label htmlFor="vm-name">Configuration name</label><input id="vm-name" className="input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="e.g. AOSP bring-up" autoFocus maxLength={64} required data-testid="input-vm-name" /><span className="field-help">A descriptive label for your saved machine profile.</span></div>
               <div className="field"><label htmlFor="vm-arch">Guest architecture</label><input id="vm-arch" className="input mono" value="AArch64" readOnly aria-readonly="true" data-testid="input-vm-architecture" /><span className="field-help">ARM64 guest architecture configured; not an emulation claim.</span></div>
-              <div className="field"><label htmlFor="vm-machine">Machine type</label><select id="vm-machine" className="select mono" value={form.machineType} onChange={(event) => setForm({ ...form, machineType: event.target.value })} data-testid="select-vm-machine"><option value="virt">virt</option><option value="Q35">Q35</option><option value="Custom">Custom profile</option></select><span className="field-help">Configuration metadata only; no machine is instantiated.</span></div>
+              <div className="field"><label htmlFor="vm-machine">Machine type</label><input id="vm-machine" className="input mono" value={ARM64_HARDWARE_DEFAULTS.machineType} readOnly aria-readonly="true" data-testid="input-vm-machine" /><span className="field-help">QEMU's generic ARM virtual platform; this is configuration only.</span></div>
+              <div className="field"><label htmlFor="vm-cpu-model">CPU model</label><input id="vm-cpu-model" className="input mono" value={ARM64_HARDWARE_DEFAULTS.cpuModel} readOnly aria-readonly="true" data-testid="input-vm-cpu-model" /><span className="field-help">Generic ARM CPU profile for the planned QEMU engine.</span></div>
+              <div className="field"><label htmlFor="vm-vcpus">Virtual CPU cores</label><input id="vm-vcpus" className="input mono" type="number" min="1" max="64" step="1" value={form.vcpuCount} onChange={(event) => setForm({ ...form, vcpuCount: event.target.value })} required data-testid="input-vm-vcpus" /><span className="field-help">Configured guest vCPU count; runtime limits are not checked yet.</span></div>
               <div className="field"><label htmlFor="vm-ram">Memory (MiB)</label><input id="vm-ram" className="input mono" type="number" min="256" max="1048576" step="256" value={form.ramMiB} onChange={(event) => setForm({ ...form, ramMiB: event.target.value })} required data-testid="input-vm-ram" /></div>
               <div className="field"><label htmlFor="vm-disk">Virtual disk capacity (GiB)</label><input id="vm-disk" className="input mono" type="number" min="1" max="4096" step="1" value={form.diskGiB} onChange={(event) => setForm({ ...form, diskGiB: event.target.value })} required data-testid="input-vm-disk" /></div>
-              <div className="field full"><label htmlFor="vm-boot-image">Boot image reference <span style={{ color: '#858982', fontWeight: 500 }}>(optional)</span></label><select id="vm-boot-image" className="select" value={form.bootImageId} onChange={(event) => setForm({ ...form, bootImageId: event.target.value })} data-testid="select-vm-boot-image"><option value="">No image linked</option>{data.assets.filter((asset) => asset.kind === 'Boot image').map((asset) => <option value={asset.id} key={asset.id}>{asset.name}</option>)}</select><span className="field-help">A reference to a locally catalogued file. No image is parsed or booted.</span></div>
+              <div className="field full"><label htmlFor="vm-disk-image">Virtual disk image <span style={{ color: '#858982', fontWeight: 500 }}>(optional)</span></label><select id="vm-disk-image" className="select" value={form.diskAssetId} onChange={(event) => setForm({ ...form, diskAssetId: event.target.value })} data-testid="select-vm-disk-image"><option value="">No disk image linked</option>{data.assets.filter((asset) => asset.kind === 'Virtual disk').map((asset) => <option value={asset.id} key={asset.id}>{asset.name}{asset.storageStatus === 'reference-only' ? ' · metadata only' : ''}</option>)}</select><span className="field-help">Links an imported disk file; capacity above is configuration and does not create a disk.</span></div>
+              <div className="field full"><label htmlFor="vm-boot-image">Boot image reference <span style={{ color: '#858982', fontWeight: 500 }}>(optional)</span></label><select id="vm-boot-image" className="select" value={form.bootImageId} onChange={(event) => setForm({ ...form, bootImageId: event.target.value })} data-testid="select-vm-boot-image"><option value="">No image linked</option>{data.assets.filter((asset) => asset.kind === 'Boot image').map((asset) => <option value={asset.id} key={asset.id}>{asset.name}{asset.storageStatus === 'reference-only' ? ' · metadata only' : ''}</option>)}</select><span className="field-help">Links a boot asset; no image is inspected or booted in this iteration.</span></div>
             </div>
+            {editing && (editing.legacyMachineType || editing.legacyArchitecture || editing.legacyCpuModel) && <div className="callout" role="note" style={{ marginTop: 16 }}><AlertTriangle className="callout-icon" size={16} /><span>Legacy hardware settings were normalized to the ARM64 profile. Original values are retained in the saved configuration{editing.legacyMachineType ? ` (machine: ${editing.legacyMachineType})` : ''}{editing.legacyArchitecture ? ` (architecture: ${editing.legacyArchitecture})` : ''}{editing.legacyCpuModel ? ` (CPU: ${editing.legacyCpuModel})` : ''}.</span></div>}
             <div className="form-actions"><button type="button" className="btn btn-quiet" onClick={cancelForm} data-testid="button-cancel-vm"><ArrowLeft size={14} /> Cancel</button><button type="submit" className="btn btn-primary" data-testid="button-save-vm"><Save size={14} /> Save configuration</button></div>
           </form>
           <div className="detail-stack">
@@ -268,8 +328,8 @@ function VMManager({ data, selectedVm, patch, notify }: { data: WorkspaceData; s
           </div>
           {filtered.length === 0 ? <EmptyState icon={<Box size={21} />} title={data.vms.length ? 'No matching configurations' : 'Your machine list is empty'} description={data.vms.length ? 'Try a different name or clear the filter.' : 'Create an ARM64 configuration to get started. It will be stored in this browser.'} action={!data.vms.length ? <button className="btn btn-primary" onClick={beginCreate} data-testid="button-vm-empty-create"><Plus size={14} /> Create configuration</button> : undefined} /> :
             <div className={`vm-list ${data.preferences.compactRows ? 'compact' : ''}`}>{filtered.map((vm) => <div key={vm.id} className="vm-row" data-testid={`row-managed-vm-${vm.id}`}>
-              <div className="vm-ident"><div className="vm-glyph"><Cpu size={17} /></div><div style={{ minWidth: 0 }}><button className="vm-name" onClick={() => patch((current) => ({ ...current, selectedVmId: vm.id }))} data-testid={`button-set-selected-${vm.id}`}>{vm.name}</button><div className="vm-id">{vm.id.slice(0, 8).toUpperCase()} · {vm.architecture}</div></div></div>
-              <div className="vm-spec">{vm.ramMiB.toLocaleString()} MiB RAM</div><div className="vm-spec">{vm.diskGiB} GiB · {vm.machineType}</div>
+              <div className="vm-ident"><div className="vm-glyph"><Cpu size={17} /></div><div style={{ minWidth: 0 }}><button className="vm-name" onClick={() => patch((current) => ({ ...current, selectedVmId: vm.id }))} data-testid={`button-set-selected-${vm.id}`}>{vm.name}</button><div className="vm-id">{vm.id.slice(0, 8).toUpperCase()} · AArch64 · {vm.machineType}/{vm.cpuModel}</div></div></div>
+              <div className="vm-spec">{vm.ramMiB.toLocaleString()} MiB RAM</div><div className="vm-spec">{vm.vcpuCount} vCPU · {vm.diskGiB} GiB disk</div>
               <div className="vm-actions"><button className="icon-btn" aria-label={`Edit ${vm.name}`} title="Edit configuration" onClick={() => beginEdit(vm)} data-testid={`button-edit-vm-${vm.id}`}><SlidersHorizontal size={14} /></button><button className="icon-btn" aria-label={`Delete ${vm.name}`} title="Delete configuration" onClick={() => data.preferences.confirmDelete ? setDeleteTarget(vm) : deleteVm(vm)} data-testid={`button-delete-vm-${vm.id}`}><Trash2 size={14} /></button></div>
             </div>)}</div>}
           {selectedVm && <div className="section-heading"><h2>Selected profile</h2><Link href="/console" className="text-link" data-testid="link-selected-console">Inspect console state <ChevronRight size={13} /></Link></div>}
@@ -313,54 +373,128 @@ function ConsolePage({ selectedVm }: { selectedVm: VMConfig | null }) {
   );
 }
 
-function StoragePage({ data, patch, notify }: { data: WorkspaceData; patch: (updater: (current: WorkspaceData) => WorkspaceData) => void; notify: ToastFn }) {
+function StoragePage({ data, patch, notify }: { data: WorkspaceData; patch: (updater: (current: WorkspaceData) => WorkspaceData) => boolean; notify: ToastFn }) {
   const [kind, setKind] = useState<'All files' | 'Virtual disk' | 'Boot image'>('All files');
+  const [importKind, setImportKind] = useState<AssetKind>('Virtual disk');
   const inputRef = useRef<HTMLInputElement>(null);
   const filtered = data.assets.filter((asset) => kind === 'All files' || asset.kind === kind);
-  const importFiles = (event: FormEvent<HTMLInputElement>) => {
-    const files = Array.from((event.currentTarget as HTMLInputElement).files ?? []);
+  const importFiles = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = '';
     if (!files.length) return;
-    const assets: AssetRecord[] = files.map((file) => {
-      const isBoot = /\.(img|iso|bin|elf|dtb|gz|xz)$/i.test(file.name);
-      return { id: createId(), name: file.name, kind: isBoot ? 'Boot image' : 'Virtual disk', sizeBytes: file.size, mimeType: file.type || 'application/octet-stream', addedAt: new Date().toISOString() };
-    });
-    patch((current) => ({ ...current, assets: [...assets, ...current.assets] }));
-    notify(`${assets.length} file reference${assets.length === 1 ? '' : 's'} added. File contents are not uploaded or stored.`);
-    if (inputRef.current) inputRef.current.value = '';
+    const validFiles = files.filter((file) => file.name.trim().length > 0 && file.size > 0);
+    if (!validFiles.length) {
+      notify('Choose a non-empty disk or boot asset.');
+      return;
+    }
+    const addedAt = new Date().toISOString();
+    const assets: AssetRecord[] = validFiles.map((file) => ({
+      id: createId(),
+      name: file.name,
+      kind: importKind,
+      sizeBytes: file.size,
+      mimeType: file.type || 'application/octet-stream',
+      addedAt,
+      storageStatus: 'indexeddb',
+    }));
+    try {
+      await assetBinaryStorage.putMany(assets.map((asset, index) => ({
+        id: asset.id,
+        name: asset.name,
+        mimeType: asset.mimeType,
+        sizeBytes: asset.sizeBytes,
+        blob: validFiles[index],
+      })));
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Browser asset storage failed.';
+      notify(`Could not store selected file${validFiles.length === 1 ? '' : 's'}: ${detail}`);
+      return;
+    }
+
+    const saved = patch((current) => ({ ...current, assets: [...assets, ...current.assets] }));
+    if (!saved) {
+      try {
+        await assetBinaryStorage.removeMany(assets.map((asset) => asset.id));
+      } catch {
+        notify('Workspace metadata was not saved, and temporary file cleanup also failed.');
+      }
+      return;
+    }
+
+    const skippedCount = files.length - validFiles.length;
+    notify(`${validFiles.length} asset${validFiles.length === 1 ? '' : 's'} stored in this browser${skippedCount ? `; skipped ${skippedCount} empty file${skippedCount === 1 ? '' : 's'}` : ''}.`);
   };
-  const removeAsset = (asset: AssetRecord) => {
-    patch((current) => ({
+  const removeAsset = async (asset: AssetRecord) => {
+    let binary: Awaited<ReturnType<typeof assetBinaryStorage.get>> = null;
+    if (asset.storageStatus === 'indexeddb') {
+      try {
+        binary = await assetBinaryStorage.get(asset.id);
+        if (binary) await assetBinaryStorage.removeMany([asset.id]);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : 'Browser asset storage failed.';
+        notify(`Could not remove “${asset.name}”: ${detail}`);
+        return;
+      }
+    }
+
+    const saved = patch((current) => ({
       ...current,
       assets: current.assets.filter((item) => item.id !== asset.id),
-      vms: current.vms.map((vm) => vm.bootImageId === asset.id ? { ...vm, bootImageId: undefined, updatedAt: new Date().toISOString() } : vm),
+      vms: current.vms.map((vm) => vm.bootImageId === asset.id || vm.diskAssetId === asset.id
+        ? { ...vm, bootImageId: vm.bootImageId === asset.id ? undefined : vm.bootImageId, diskAssetId: vm.diskAssetId === asset.id ? undefined : vm.diskAssetId, updatedAt: new Date().toISOString() }
+        : vm),
     }));
-    notify(`Removed file reference “${asset.name}”.`);
+    if (!saved) {
+      if (binary) {
+        try {
+          await assetBinaryStorage.putMany([binary]);
+        } catch {
+          notify('Workspace metadata was not saved, and the removed file could not be restored.');
+        }
+      }
+      return;
+    }
+    if (asset.storageStatus === 'indexeddb' && !binary) {
+      notify(`Removed “${asset.name}”; its binary file was already missing from browser storage.`);
+      return;
+    }
+    notify(`Removed “${asset.name}”.`);
+  };
+  const downloadAsset = async (asset: AssetRecord) => {
+    try {
+      await assetBinaryStorage.download(asset.id);
+      notify(`Downloaded “${asset.name}”.`);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'The stored file could not be downloaded.';
+      notify(detail);
+    }
   };
   return (
     <main className="page-wrap">
-      <PageHead eyebrow="Workspace / Storage" title="Storage references" subtitle="Catalogue local virtual-disk and boot-image references. Import records file metadata only; this prototype does not copy, parse, mount, or boot files.">
+      <PageHead eyebrow="Workspace / Storage" title="Storage manager" subtitle="Store and manage disk and boot-image files locally in this browser. AxeVM does not parse, mount, or boot them yet.">
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="btn btn-quiet" onClick={() => workspaceStorage.exportManifest(data)} data-testid="button-export-manifest"><ArrowDownToLine size={14} /> Export manifest</button>
-          <button className="btn btn-primary" onClick={() => inputRef.current?.click()} data-testid="button-import-files"><Upload size={14} /> Import references</button>
-          <input ref={inputRef} type="file" multiple hidden onChange={importFiles} data-testid="input-import-files" aria-label="Choose files to import as references" />
+          <select className="select" value={importKind} onChange={(event) => setImportKind(event.target.value as AssetKind)} aria-label="Asset type to import" data-testid="select-import-asset-kind"><option value="Virtual disk">Virtual disk</option><option value="Boot image">Boot image</option></select>
+          <button className="btn btn-primary" onClick={() => inputRef.current?.click()} data-testid="button-import-files"><Upload size={14} /> Import files</button>
+          <input ref={inputRef} type="file" multiple hidden accept={importKind === 'Virtual disk' ? '.qcow,.qcow2,.raw,.img,.vhd,.vhdx' : '.img,.iso,.elf,.dtb,.bin,.gz,.xz'} onChange={importFiles} data-testid="input-import-files" aria-label={`Choose ${importKind.toLowerCase()} files`} />
         </div>
       </PageHead>
-      <div className="callout"><FileArchive className="callout-icon" size={16} /><span>Imported files stay on your device. AxeVM saves only their names, sizes, types, and references in browser storage; an exported JSON file contains workspace metadata, not disk contents.</span></div>
+      <div className="callout"><FileArchive className="callout-icon" size={16} /><span>New binary assets are stored in this browser's IndexedDB; workspace metadata is saved separately. Export manifest backs up metadata only. Use each asset's download control to export its file bytes.</span></div>
       <div className="storage-toolbar">
-        <div className="tabs" role="tablist" aria-label="Filter file references">
+        <div className="tabs" role="tablist" aria-label="Filter assets">
           {(['All files', 'Virtual disk', 'Boot image'] as const).map((option) => <button key={option} role="tab" aria-selected={kind === option} className="tab" onClick={() => setKind(option)} data-testid={`tab-storage-${option.toLowerCase().replace(' ', '-')}`}>{option} <span className="mono">({option === 'All files' ? data.assets.length : data.assets.filter((asset) => asset.kind === option).length})</span></button>)}
         </div>
       </div>
-      {filtered.length === 0 ? <EmptyState icon={<HardDrive size={21} />} title={data.assets.length ? 'No files in this category' : 'No file references'} description={data.assets.length ? 'Import a file to add its metadata as a reference.' : 'Import a local file to catalogue its name and size. The browser prototype will not copy or inspect its contents.'} action={<button className="btn btn-primary" onClick={() => inputRef.current?.click()} data-testid="button-empty-import"><Upload size={14} /> Import references</button>} /> :
-        <section className="panel" aria-label="Stored file references">
+      {filtered.length === 0 ? <EmptyState icon={<HardDrive size={21} />} title={data.assets.length ? 'No files in this category' : 'No stored assets'} description={data.assets.length ? 'Import a disk or boot asset to add it to this category.' : 'Choose an asset type, then import a file. The browser stores its bytes locally in IndexedDB.'} action={<button className="btn btn-primary" onClick={() => inputRef.current?.click()} data-testid="button-empty-import"><Upload size={14} /> Import files</button>} /> :
+        <section className="panel" aria-label="Stored assets">
           {filtered.map((asset) => <div className="asset-row" key={asset.id} data-testid={`row-asset-${asset.id}`}>
             <div className="vm-ident"><div className="vm-glyph">{asset.kind === 'Boot image' ? <FileImage size={16} /> : <HardDrive size={16} />}</div><div style={{ minWidth: 0 }}><div className="vm-name" title={asset.name}>{asset.name}</div><div className="vm-id">{asset.id.slice(0, 8).toUpperCase()} · ADDED {timeLabel(asset.addedAt).toUpperCase()}</div></div></div>
-            <div className="asset-kind">{asset.kind}</div><div className="asset-size">{formatBytes(asset.sizeBytes)} · metadata only</div>
-            <div className="vm-actions"><button className="icon-btn" aria-label={`Remove ${asset.name}`} title="Remove reference" onClick={() => removeAsset(asset)} data-testid={`button-remove-asset-${asset.id}`}><Trash2 size={14} /></button></div>
+            <div className="asset-kind">{asset.kind}</div><div className="asset-size">{formatBytes(asset.sizeBytes)} · {asset.storageStatus === 'indexeddb' ? 'binary stored' : 'legacy metadata only'}</div>
+            <div className="vm-actions">{asset.storageStatus === 'indexeddb' && <button className="icon-btn" aria-label={`Download ${asset.name}`} title="Download file" onClick={() => void downloadAsset(asset)} data-testid={`button-download-asset-${asset.id}`}><Download size={14} /></button>}<button className="icon-btn" aria-label={`Remove ${asset.name}`} title="Remove asset" onClick={() => void removeAsset(asset)} data-testid={`button-remove-asset-${asset.id}`}><Trash2 size={14} /></button></div>
           </div>)}
         </section>}
       <div className="section-heading"><h2>About file references</h2></div>
-      <div className="notice">The import control reads file metadata from the browser's file picker, but does not send the file anywhere or retain its binary data. Use manifest export to back up configuration and references. A future native storage adapter will be required for real virtual disks and boot images.</div>
+      <div className="notice">Older workspace entries may be metadata-only references because the previous build did not store their file contents. New imports persist the actual bytes in this browser's IndexedDB. Storage is not synced; browser storage quotas apply. The manifest export contains configuration and asset metadata, not binary data.</div>
     </main>
   );
 }
@@ -382,7 +516,7 @@ function SettingsPage({ preferences, onChange }: { preferences: Preferences; onC
         <section className="panel setting-row"><div><h3>Compact VM list</h3><p>Preference saved for a future denser list presentation.</p></div><button className="toggle" role="switch" aria-checked={preferences.compactRows} aria-label="Compact VM list" onClick={() => setPref('compactRows', !preferences.compactRows)} data-testid="switch-compact-rows" /></section>
       </div>
       <div className="section-heading"><h2>Application</h2></div>
-      <div className="panel setting-row"><div><h3>Persistence</h3><p>Preferences and VM configuration are stored in browser local storage on this device.</p></div><span className="state-tag"><Check size={12} /> Local</span></div>
+       <div className="panel setting-row"><div><h3>Persistence</h3><p>VM configurations and preferences use browser local storage; imported asset bytes use IndexedDB on this device.</p></div><span className="state-tag"><Check size={12} /> Local</span></div>
       <div className="panel setting-row" style={{ marginTop: 10 }}><div><h3>Execution engine</h3><p>QEMU, Android native integration, JNI, and guest execution are outside this browser milestone.</p></div><span className="state-tag">In development</span></div>
       <div style={{ marginTop: 20 }}><button className="btn btn-quiet" onClick={() => setLocation('/')} data-testid="button-settings-done">Return to overview <ChevronRight size={14} /></button></div>
     </main>
